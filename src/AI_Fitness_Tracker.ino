@@ -8,18 +8,23 @@ MPU6050 mpu;
 int16_t ax, ay, az;
 int16_t gx, gy, gz;
 
-// Smoothing
+// Smoothed acceleration
 float smoothedA = 1.0;
 float alpha = 0.7; // smoothing factor
 
 // Rep counting
-bool inSquat = false;
+enum SquatPhase {IDLE, GOING_DOWN, IN_HOLE, GOING_UP, AT_TOP};
+SquatPhase phase = IDLE;
 int repCount = 0;
 
 // Timing
 unsigned long lastRepTime = 0;
 const unsigned long repDebounce = 600; // ms
-unsigned long downTime = 0;
+unsigned long downStart = 0;
+unsigned long holeStart = 0;
+unsigned long holeEnd = 0;
+unsigned long upEnd = 0;
+unsigned long topStart = 0;
 
 void setup() {
   Wire.begin();
@@ -30,56 +35,93 @@ void setup() {
     Serial.println("MPU6050 connection failed!");
     while (true);
   }
-  Serial.println("MPU6050 ready (barbell squat tracker with speed)");
+  Serial.println("MPU6050 ready (full squat timing tracker)");
+
+  // Countdown calibration
+  Serial.println("Start in 3...");
+  delay(1000);
+  Serial.println("2...");
+  delay(1000);
+  Serial.println("1...");
+  delay(1000);
+  Serial.println("Go!");
 }
 
 void loop() {
-  // Read accelerometer + gyro
+  // Read MPU
   mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
 
-  // Convert to g
   float Ax = ax / 16384.0;
   float Ay = ay / 16384.0;
   float Az = az / 16384.0;
 
-  // Total acceleration magnitude (rotation-independent)
+  // Total acceleration magnitude
   float A_total = sqrt(Ax*Ax + Ay*Ay + Az*Az);
-
-  // Smooth signal
   smoothedA = alpha * smoothedA + (1 - alpha) * A_total;
 
   unsigned long now = millis();
 
-  // Detect bar going DOWN
-  if (!inSquat && smoothedA > 1.05 && (now - lastRepTime > repDebounce)) {
-    inSquat = true;
-    downTime = now; // record start of rep
-    Serial.println("DOWN");
+  switch (phase) {
+    case IDLE:
+      if (smoothedA > 1.05 && (now - lastRepTime > repDebounce)) {
+        phase = GOING_DOWN;
+        downStart = now;
+        Serial.println("GOING DOWN");
+      }
+      break;
+
+    case GOING_DOWN:
+      if (smoothedA < 1.02) { // stationary at bottom
+        phase = IN_HOLE;
+        holeStart = now;
+        Serial.println("IN HOLE");
+      }
+      break;
+
+    case IN_HOLE:
+      if (smoothedA > 1.05) { // moving up
+        phase = GOING_UP;
+        holeEnd = now;
+        Serial.println("GOING UP");
+      }
+      break;
+
+    case GOING_UP:
+      if (smoothedA < 1.0) { // stationary at top
+        phase = AT_TOP;
+        upEnd = now;
+        topStart = now;
+        Serial.println("AT TOP");
+
+        // Count rep
+        repCount++;
+
+        float timeDown = (holeStart - downStart) / 1000.0;
+        float timeInHole = (holeEnd - holeStart) / 1000.0;
+        float timeUp = (upEnd - holeEnd) / 1000.0;
+
+        Serial.print("REP ");
+        Serial.print(repCount);
+        Serial.print(" | Down: ");
+        Serial.print(timeDown, 2);
+        Serial.print(" s | Hole: ");
+        Serial.print(timeInHole, 2);
+        Serial.print(" s | Up: ");
+        Serial.print(timeUp, 2);
+        Serial.print(" s | Top: counting...");
+        Serial.println(" (ongoing)");
+      }
+      break;
+
+    case AT_TOP:
+      if (smoothedA > 1.05) { // starting next rep
+        phase = GOING_DOWN;
+        downStart = now;
+        lastRepTime = now;
+        Serial.println("GOING DOWN");
+      }
+      break;
   }
 
-  // Detect bar coming UP → count rep & measure speed
-  else if (inSquat && smoothedA < 0.95 && (now - lastRepTime > repDebounce)) {
-    inSquat = false;
-    repCount++;
-    lastRepTime = now;
-
-    unsigned long upTime = now;
-    float repDuration = (upTime - downTime) / 1000.0; // seconds
-
-    Serial.print("REP: ");
-    Serial.print(repCount);
-    Serial.print(" | Speed: ");
-    Serial.print(repDuration, 2);
-    Serial.println(" s");
-  }
-
-  // Optional: print total acceleration occasionally
-  static unsigned long lastPrint = 0;
-  if (now - lastPrint > 1000) {
-    Serial.print("Total g: ");
-    Serial.println(smoothedA, 3);
-    lastPrint = now;
-  }
-
-  delay(50); // stable 20Hz update
+  delay(25); // ~20Hz
 }
